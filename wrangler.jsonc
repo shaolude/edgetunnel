@@ -1,5 +1,5 @@
 {
-	"name": "worker-name",
+	"name": "edgetunnel",
 	"compatibility_date": "2025-06-12",
 	"main": "src/_worker.ts"
   }
