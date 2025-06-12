@@ -1,0 +1,5 @@
+{
+	"name": "worker-name",
+	"compatibility_date": "2025-06-12",
+	"main": "src/_worker.ts"
+  }
