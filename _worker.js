@@ -89,7 +89,7 @@ export default {
             proxyIP = env.PROXYIP || env.proxyip || proxyIP;
             proxyIPs = await 整理(proxyIP);
             proxyIP = proxyIPs[Math.floor(Math.random() * proxyIPs.length)];
-            DNS64Server = env.DNS64 || env.NAT64 || (DNS64Server != '' ? DNS64Server : atob("ZG5zNjQuY21saXVzc3NzLm5ldA=="));
+            DNS64Server = env.DNS64 || env.NAT64 || DNS64Server;
             socks5Address = env.HTTP || env.SOCKS5 || socks5Address;
             socks5s = await 整理(socks5Address);
             socks5Address = socks5s[Math.floor(Math.random() * socks5s.length)];
@@ -183,7 +183,7 @@ export default {
                     let pagesSum = UD;
                     let workersSum = UD;
                     let total = 24 * 1099511627776;
-                    if (env.CF_EMAIL && env.CF_APIKEY) {
+                    if ((env.CF_EMAIL && env.CF_APIKEY) || (env.CF_ID && env.CF_APITOKEN)) {
                         const usage = await getUsage(env.CF_ID, env.CF_EMAIL, env.CF_APIKEY, env.CF_APITOKEN, env.CF_ALL);
                         pagesSum = usage[1];
                         workersSum = usage[2];
@@ -294,14 +294,16 @@ async function 维列斯OverWSHandler(request) {
         value: null,
     };
     // 标记是否为 DNS 查询
+    let udpStreamWrite = null;
     let isDns = false;
 
     // WebSocket 数据流向远程服务器的管道
     readableWebSocketStream.pipeTo(new WritableStream({
         async write(chunk, controller) {
-            if (isDns) {
+            if (isDns && udpStreamWrite) {
                 // 如果是 DNS 查询，调用 DNS 处理函数
-                return await handleDNSQuery(chunk, webSocket, null, log);
+                //return await handleDNSQuery(chunk, webSocket, null, log);
+                return udpStreamWrite(chunk);
             }
             if (remoteSocketWapper.value) {
                 // 如果已有远程 Socket，直接写入数据
@@ -346,7 +348,11 @@ async function 维列斯OverWSHandler(request) {
 
             if (isDns) {
                 // 如果是 DNS 查询，调用 DNS 处理函数
-                return handleDNSQuery(rawClientData, webSocket, 维列斯ResponseHeader, log);
+                //return handleDNSQuery(rawClientData, webSocket, 维列斯ResponseHeader, log);
+                const { write } = await handleUDPOutBound(webSocket, 维列斯ResponseHeader, log);
+                udpStreamWrite = write;
+                udpStreamWrite(rawClientData);
+                return;
             }
             // 处理 TCP 出站连接
             if (!banHosts.includes(addressRemote)) {
@@ -873,6 +879,78 @@ function stringify(arr, offset = 0) {
         //uuid = userID;
     }
     return uuid;
+}
+
+/**
+ * 
+ * @param {import("@cloudflare/workers-types").WebSocket} webSocket 
+ * @param {ArrayBuffer} 维列斯ResponseHeader 
+ * @param {(string)=> void} log 
+ */
+async function handleUDPOutBound(webSocket, 维列斯ResponseHeader, log) {
+
+    let is维列斯HeaderSent = false;
+    const transformStream = new TransformStream({
+        start(controller) {
+
+        },
+        transform(chunk, controller) {
+            // udp message 2 byte is the the length of udp data
+            // TODO: this should have bug, beacsue maybe udp chunk can be in two websocket message
+            for (let index = 0; index < chunk.byteLength;) {
+                const lengthBuffer = chunk.slice(index, index + 2);
+                const udpPakcetLength = new DataView(lengthBuffer).getUint16(0);
+                const udpData = new Uint8Array(
+                    chunk.slice(index + 2, index + 2 + udpPakcetLength)
+                );
+                index = index + 2 + udpPakcetLength;
+                controller.enqueue(udpData);
+            }
+        },
+        flush(controller) {
+        }
+    });
+
+    // only handle dns udp for now
+    transformStream.readable.pipeTo(new WritableStream({
+        async write(chunk) {
+            const resp = await fetch('https://1.1.1.1/dns-query',
+                {
+                    method: 'POST',
+                    headers: {
+                        'content-type': 'application/dns-message',
+                    },
+                    body: chunk,
+                })
+            const dnsQueryResult = await resp.arrayBuffer();
+            const udpSize = dnsQueryResult.byteLength;
+            // console.log([...new Uint8Array(dnsQueryResult)].map((x) => x.toString(16)));
+            const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
+            if (webSocket.readyState === WS_READY_STATE_OPEN) {
+                log(`doh success and dns message length is ${udpSize}`);
+                if (is维列斯HeaderSent) {
+                    webSocket.send(await new Blob([udpSizeBuffer, dnsQueryResult]).arrayBuffer());
+                } else {
+                    webSocket.send(await new Blob([维列斯ResponseHeader, udpSizeBuffer, dnsQueryResult]).arrayBuffer());
+                    is维列斯HeaderSent = true;
+                }
+            }
+        }
+    })).catch((error) => {
+        log('dns udp has error' + error)
+    });
+
+    const writer = transformStream.writable.getWriter();
+
+    return {
+        /**
+         * 
+         * @param {Uint8Array} chunk 
+         */
+        write(chunk) {
+            writer.write(chunk);
+        }
+    };
 }
 
 /**
@@ -2393,6 +2471,29 @@ async function KV(request, env, txt = 'ADD.txt') {
 }
 
 async function resolveToIPv6(target) {
+    if (!DNS64Server) {
+        const defaultAddress = atob('cHJveHlpcC5jbWxpdXNzc3MubmV0');
+        try {
+            const response = await fetch(atob('aHR0cHM6Ly8xLjEuMS4xL2Rucy1xdWVyeT9uYW1lPW5hdDY0LmNtbGl1c3Nzcy5uZXQmdHlwZT1UWFQ='), {
+                headers: { 'Accept': 'application/dns-json' }
+            });
+
+            if (!response.ok) return defaultAddress;
+            const data = await response.json();
+            const txtRecords = (data.Answer || []).filter(record => record.type === 16).map(record => record.data);
+
+            if (txtRecords.length === 0) return defaultAddress;
+            let txtData = txtRecords[0];
+            if (txtData.startsWith('"') && txtData.endsWith('"')) txtData = txtData.slice(1, -1);
+            const prefixes = txtData.replace(/\\010/g, '\n').split('\n').filter(prefix => prefix.trim());
+            if (prefixes.length === 0) return defaultAddress;
+            DNS64Server = prefixes[Math.floor(Math.random() * prefixes.length)];
+        } catch (error) {
+            console.error('DNS64Server查询失败:', error);
+            return defaultAddress;
+        }
+    }
+
     // 检查是否为IPv4
     function isIPv4(str) {
         const parts = str.split('.');
@@ -2409,7 +2510,7 @@ async function resolveToIPv6(target) {
 
     // 获取域名的IPv4地址
     async function fetchIPv4(domain) {
-        const url = `https://cloudflare-dns.com/dns-query?name=${domain}&type=A`;
+        const url = `https://1.1.1.1/dns-query?name=${domain}&type=A`;
         const response = await fetch(url, {
             headers: { 'Accept': 'application/dns-json' }
         });
@@ -2585,7 +2686,7 @@ async function resolveToIPv6(target) {
         return isIPv6(nat64) ? nat64 : atob('cHJveHlpcC5jbWxpdXNzc3MubmV0');
     } catch (error) {
         console.error('解析错误:', error);
-        return atob('cHJveHlpcC5jbWxpdXNzc3MubmV0');;
+        return atob('cHJveHlpcC5jbWxpdXNzc3MubmV0');
     }
 }
 
@@ -2599,7 +2700,7 @@ async function bestIP(request, env, txt = 'ADD.txt') {
                     'Accept': 'application/dns-json'
                 }
             });
-            
+
             if (response.ok) {
                 const data = await response.json();
                 if (data.Status === 0 && data.Answer && data.Answer.length > 0) {
